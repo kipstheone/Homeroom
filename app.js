@@ -2,7 +2,7 @@
 /* ============================================================
    ODO — app logic
    ============================================================ */
-const APP_VERSION = "v1.0.0";
+const APP_VERSION = "v1.1.0";
 
 /* ---------- tiny helpers ---------- */
 const $ = s => document.querySelector(s);
@@ -2124,15 +2124,30 @@ async function gcalSync(mode = false) {
     await gcalPush(calId);
     persist();
     scheduleCloudPush();
+    LAST_SYNC_ERR.gcal = "";
     setPill("synced " + new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }), true);
     if (UI.view !== "settings") render();
     if (interactive) { render(); toast("Google Calendar connected"); }
   } catch (e) {
-    console.warn("gcal sync", e);
-    setPill("Google sync hiccup", false, true);
-    if (interactive) toast("Google sync failed — check Settings");
+    const reason = gcalReason(e);
+    LAST_SYNC_ERR.gcal = reason;
+    console.warn("gcal sync:", reason, e);
+    setPill("Google sync failed", false, true);
+    if (interactive) syncErrorModal("Google sync failed", reason, gcalHelp);
   }
   gcalBusy = false;
+}
+/* Turns a Google Calendar failure into something actionable. */
+function gcalReason(e) {
+  const m = String(e?.message || e || "");
+  if (m.includes("auth") || m.includes("401")) return "Google sign-in expired. If your OAuth app is still in Testing mode, Google expires access every 7 days — press Connect Google to sign in again, or publish the app in the OAuth consent screen to stop the expiry.";
+  if (m.includes("403")) return "Google refused the request (403). Usually the Calendar API isn't enabled for the project, or your account isn't on the OAuth test-users list.";
+  if (m.includes("404")) return "The ODO calendar wasn't found (404). Press Connect Google — it will recreate it.";
+  if (m.includes("429")) return "Google rate-limited the sync (429). Wait a minute, then try again.";
+  if (m.includes("no-token")) return "No Google access token. Press Connect Google to sign in.";
+  if (m.includes("Failed to fetch") || m.includes("NetworkError")) return "Couldn't reach Google — check your connection.";
+  if (m.startsWith("gcal ")) return "Google Calendar API error " + m.replace("gcal ", "") + ".";
+  return m || "Unknown Google sync error.";
 }
 function gcalQueuePush() {
   if (!gcalLinked() || !S.settings.gcalClientId) return;
@@ -2158,18 +2173,44 @@ function scheduleCloudPush() {
   clearTimeout(cloudTimer);
   cloudTimer = setTimeout(() => cloudSync(), 2500);
 }
+/* Turns a Supabase failure into a sentence a human can act on. */
+function supaReason(status, bodyText) {
+  const b = (bodyText || "").toLowerCase();
+  if (status === 0) return "Can't reach Supabase — project is paused, the URL is wrong, or you're offline. Free projects pause after ~1 week idle; open your Supabase dashboard and press Restore.";
+  if (status === 401 || status === 403) return "Supabase rejected the key (" + status + "). Re-copy the anon key from Settings → API.";
+  if (status === 404) return "Table not found (404). Run the setup SQL — Settings → Device sync → setup instructions.";
+  if (status === 409) return "Conflict (409) — the table exists but its columns don't match the setup SQL.";
+  if (b.includes("row-level security") || b.includes("policy")) return "Blocked by row-level security. Run the policy line from the setup SQL.";
+  if (status >= 500) return "Supabase server error (" + status + "). Usually a paused or restarting project — try again shortly.";
+  return "Supabase error " + status + (bodyText ? ": " + bodyText.slice(0, 120) : "");
+}
 async function supaFetch(method, query, body) {
   const s = S.settings;
-  const r = await fetch(s.supaUrl.replace(/\/+$/, "") + "/rest/v1/homeroom_state" + query, {
-    method,
-    headers: {
-      apikey: s.supaKey, Authorization: "Bearer " + s.supaKey,
-      "Content-Type": "application/json",
-      Prefer: "resolution=merge-duplicates,return=minimal",
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!r.ok) throw new Error("supabase " + r.status);
+  let r;
+  try {
+    r = await fetch(s.supaUrl.replace(/\/+$/, "") + "/rest/v1/homeroom_state" + query, {
+      method,
+      headers: {
+        apikey: s.supaKey, Authorization: "Bearer " + s.supaKey,
+        "Content-Type": "application/json",
+        Prefer: "resolution=merge-duplicates,return=minimal",
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (netErr) {
+    /* fetch() only rejects on network/CORS/DNS failure — no HTTP status exists */
+    const e = new Error(supaReason(0, ""));
+    e.reason = supaReason(0, "");
+    throw e;
+  }
+  if (!r.ok) {
+    let txt = "";
+    try { txt = await r.text(); } catch (_) { }
+    const e = new Error("supabase " + r.status);
+    e.status = r.status;
+    e.reason = supaReason(r.status, txt);
+    throw e;
+  }
   return method === "GET" ? r.json() : null;
 }
 function sharedState() {
@@ -2221,7 +2262,7 @@ function mergeRemote(remote) {
   }
   return changed;
 }
-async function cloudSync() {
+async function cloudSync(interactive = false) {
   if (!supaConfigured() || cloudBusy) return;
   cloudBusy = true;
   try {
@@ -2231,14 +2272,32 @@ async function cloudSync() {
     if (rows && rows[0] && rows[0].state) changed = mergeRemote(rows[0].state);
     persist();
     await supaFetch("POST", "", [{ id: S.settings.syncId, state: sharedState(), updated_at: new Date().toISOString() }]);
+    LAST_SYNC_ERR.supa = "";
     setPill("synced " + new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }), true);
+    if (interactive) toast("Device sync complete");
     /* never re-render Settings from a background sync — it would wipe half-typed fields */
     if (changed && UI.view !== "settings" && !$("#modal-veil").classList.contains("open")) render();
   } catch (e) {
-    console.warn("cloud sync", e);
-    setPill("device sync hiccup", false, true);
+    const reason = e.reason || e.message || "unknown error";
+    LAST_SYNC_ERR.supa = reason;
+    console.warn("cloud sync:", reason, e);
+    setPill("device sync failed", false, true);
+    if (interactive) syncErrorModal("Device sync failed", reason, supaHelp);
   }
   cloudBusy = false;
+}
+/* Last failure reason per service, so Settings can show it instead of a shrug. */
+const LAST_SYNC_ERR = { supa: "", gcal: "" };
+function syncErrorModal(title, reason, helpFn) {
+  openModal(`
+    <h2>${esc(title)}</h2>
+    <p style="font-size:14.5px;line-height:1.55;margin:-6px 0 14px">${esc(reason)}</p>
+    <div class="modal-actions">
+      <button class="btn ghost" id="se-close">Close</button>
+      ${helpFn ? `<button class="btn primary" id="se-help">Setup instructions</button>` : ""}
+    </div>`);
+  $("#se-close").onclick = closeModal;
+  if (helpFn) $("#se-help").onclick = () => { closeModal(); helpFn(); };
 }
 
 /* ============================================================
@@ -2399,6 +2458,7 @@ function renderSettings() {
         ${gcalLinked() ? `<button class="btn ghost danger" id="st-gdisc">Disconnect</button>` : ""}
         <span class="hint">${gcalLinked() ? "Connected — sign-in refreshes about every hour." : "Not connected yet."}</span>
       </div>
+      ${LAST_SYNC_ERR.gcal ? `<div class="syncerr">Last error: ${esc(LAST_SYNC_ERR.gcal)}</div>` : ""}
     </div>
 
     <div class="card set-section">
@@ -2408,6 +2468,7 @@ function renderSettings() {
       <div class="field"><label>Supabase anon key</label><input id="st-skey" value="${esc(s.supaKey)}" placeholder="eyJhbGciOi…" autocomplete="off"></div>
       <div class="field"><label>Sync code</label><input id="st-sid" value="${esc(s.syncId)}" placeholder="something long and personal, like a passphrase" autocomplete="off"><span class="hint">Acts like a password for your data — make it long and unguessable.</span></div>
       <button class="btn primary" id="st-ssave">Save & sync now</button>
+      ${LAST_SYNC_ERR.supa ? `<div class="syncerr">Last error: ${esc(LAST_SYNC_ERR.supa)}</div>` : ""}
     </div>
 
     <div class="card set-section">
@@ -2482,7 +2543,7 @@ function renderSettings() {
   };
   if (gcalLinked()) $("#st-gdisc").onclick = () => { gcalDisconnect(); renderSettings(); toast("Google disconnected"); };
   $("#st-ssave").onclick = () => {
-    if (supaConfigured()) { cloudSync(); toast("Syncing…"); }
+    if (supaConfigured()) { cloudSync(true); toast("Syncing…"); }
     else toast("Fill in all three fields to enable sync");
   };
   $("#st-export").onclick = () => {
