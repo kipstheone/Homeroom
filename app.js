@@ -863,9 +863,19 @@ function courseDetail(c) {
   }, true);
 }
 const DAY_LETTERS = ["Su", "M", "Tu", "W", "Th", "F", "Sa"];
+/* A course can meet as several session types under the same course. */
+const MEET_KINDS = ["Lecture", "Lab", "Discussion", "Seminar", "Studio", "Recitation", "Other"];
+/* Short suffix for the schedule block, e.g. "BIO 101 · Lab". Lecture is the
+   default so it stays unlabeled to avoid noise. */
+const meetKindTag = k => (k && k !== "Lecture") ? k : "";
 function meetingsLabel(meetings) {
   return (meetings || []).filter(m => m.days.length && m.start)
-    .map(m => [...m.days].sort((a, b) => ((a + 6) % 7) - ((b + 6) % 7)).map(d => DAY_LETTERS[d]).join("") + " " + fmtTime12(m.start) + (m.end ? "–" + fmtTime12(m.end) : ""))
+    .map(m => {
+      const days = [...m.days].sort((a, b) => a - b).map(d => DAY_LETTERS[d]).join("");
+      const time = fmtTime12(m.start) + (m.end ? "–" + fmtTime12(m.end) : "");
+      const tag = meetKindTag(m.kind);
+      return (tag ? tag + " " : "") + days + " " + time;
+    })
     .join(" · ");
 }
 function customRowHtml(k, v) {
@@ -879,7 +889,7 @@ function courseEditor(c) {
   const isNew = !c;
   c = c || { name: "", code: "", color: COURSE_COLORS[alive(S.courses).length % COURSE_COLORS.length], meetingTimes: "", meetings: [], room: "", instructor: "", email: "", officeHours: "", syllabusUrl: "", grading: "", description: "", textbooks: "", custom: [] };
   let pickedColor = c.color;
-  let meets = (c.meetings || []).map(m => ({ days: [...(m.days || [])], start: m.start || "", end: m.end || "" }));
+  let meets = (c.meetings || []).map(m => ({ days: [...(m.days || [])], start: m.start || "", end: m.end || "", kind: m.kind || "Lecture" }));
   openModal(`
     <h2>${isNew ? "New course" : "Edit course"}</h2>
     <div class="fieldrow">
@@ -918,6 +928,9 @@ function courseEditor(c) {
   const renderMeets = () => {
     $("#ce-meets").innerHTML = meets.map((m, i) => `
       <div class="meetrow">
+        <select class="mr-kind" data-mi="${i}" aria-label="session type">
+          ${MEET_KINDS.map(k => `<option value="${k}" ${(m.kind || "Lecture") === k ? "selected" : ""}>${k}</option>`).join("")}
+        </select>
         <div class="daypicker mini">${[1, 2, 3, 4, 5, 6, 0].map(d => `<button type="button" data-mi="${i}" data-d="${d}" class="${m.days.includes(d) ? "on" : ""}">${DOW[d][0]}</button>`).join("")}</div>
         <input type="time" class="mr-t" data-mi="${i}" data-f="start" value="${esc(m.start)}">
         <span class="hint">–</span>
@@ -930,11 +943,12 @@ function courseEditor(c) {
       m.days = m.days.includes(d) ? m.days.filter(x => x !== d) : [...m.days, d];
       renderMeets();
     });
+    $$("#ce-meets .mr-kind").forEach(sel => sel.onchange = () => { meets[+sel.dataset.mi].kind = sel.value; });
     $$("#ce-meets .mr-t").forEach(inp => inp.onchange = () => { meets[+inp.dataset.mi][inp.dataset.f] = inp.value; });
     $$("#ce-meets [data-mx]").forEach(b => b.onclick = () => { meets.splice(+b.dataset.mx, 1); renderMeets(); });
   };
   renderMeets();
-  $("#ce-addmeet").onclick = () => { meets.push({ days: [], start: "", end: "" }); renderMeets(); };
+  $("#ce-addmeet").onclick = () => { meets.push({ days: [], start: "", end: "", kind: "Lecture" }); renderMeets(); };
   const wireCustomRows = () => $$("#ce-custom .cf-x").forEach(b => b.onclick = () => b.closest(".customrow").remove());
   wireCustomRows();
   $("#ce-addcustom").onclick = () => {
@@ -951,7 +965,7 @@ function courseEditor(c) {
   $("#ce-save").onclick = () => {
     const name = $("#ce-name").value.trim();
     if (!name) { toast("The course needs a name"); return; }
-    const meetings = meets.filter(m => m.days.length && m.start).map(m => ({ days: [...m.days], start: m.start, end: m.end || "" }));
+    const meetings = meets.filter(m => m.days.length && m.start).map(m => ({ days: [...m.days], start: m.start, end: m.end || "", kind: m.kind || "Lecture" }));
     const data = {
       name, code: $("#ce-code").value.trim(), color: pickedColor,
       meetings, meetingTimes: meetingsLabel(meetings), room: $("#ce-room").value.trim(),
@@ -1407,8 +1421,10 @@ function dailyItems(dow) {
   for (const c of alive(S.courses)) {
     (c.meetings || []).forEach((m, i) => {
       if (m.days && m.days.includes(dow) && m.start) {
+        const tag = meetKindTag(m.kind);
         timed.push({
-          id: `crs-${c.id}-${i}`, title: c.code || c.name, kind: "class",
+          id: `crs-${c.id}-${i}`, title: (c.code || c.name) + (tag ? " · " + tag : ""), kind: "class",
+          meetKind: m.kind || "Lecture",
           time: m.start, endTime: m.end || "", color: c.color, courseId: c.id, isCourse: true, order: 0,
         });
       }
