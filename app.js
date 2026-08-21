@@ -2,7 +2,7 @@
 /* ============================================================
    ODO — app logic
    ============================================================ */
-const APP_VERSION = "v1.3.0";
+const APP_VERSION = "v1.4.0";
 
 /* ---------- tiny helpers ---------- */
 const $ = s => document.querySelector(s);
@@ -138,7 +138,7 @@ const UI = {
   routineDate: todayStr(), calMonth: null, calMode: "month",
   asgCourse: "all", asgType: "all", asgHideDone: false,
   homeCal: null, dashCalTodos: true,
-  linkEdit: false, arrange: false, weekMode: "week",
+  linkEdit: false, arrange: false, weekMode: "week", courseMode: "cards",
 };
 
 /* ---------- theme ---------- */
@@ -579,6 +579,20 @@ function dashLayout() {
   for (const id of DASH_PANELS) out[id] = { ...DASH_DEFAULT[id], ...(saved[id] || {}) };
   return out;
 }
+/* Live clock beside the dashboard greeting. */
+function clockNow() {
+  const d = new Date();
+  return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+let clockTimer = null;
+function startClock() {
+  clearInterval(clockTimer);
+  clockTimer = setInterval(() => {
+    const el = $("#homeclock");
+    if (!el) { clearInterval(clockTimer); clockTimer = null; return; }
+    el.textContent = clockNow();
+  }, 1000);
+}
 /* "+ Add" on the dashboard: assignment or to-do? */
 function addChooser(presetDay) {
   openModal(`
@@ -702,7 +716,10 @@ function renderHome() {
     ${S.settings.banner ? `<img class="banner" src="${S.settings.banner}" alt="">` : ""}
     <div class="viewhead">
       <div>
-        <h1>${g.part}${S.settings.userName ? ", " + esc(S.settings.userName) : ""}.</h1>
+        <h1 class="greet-line">
+          <span>${g.part}${S.settings.userName ? ", " + esc(S.settings.userName) : ""}.</span>
+          <span class="homeclock" id="homeclock">${clockNow()}</span>
+        </h1>
         <svg class="squiggle" width="150" height="8" viewBox="0 0 150 8"><path d="M2 5 Q 14 1 26 5 T 50 5 T 74 5 T 98 5 T 122 5 T 146 5"/></svg>
         <div class="greeting">${niceDate(today)} — ${g.line}</div>
       </div>
@@ -717,6 +734,7 @@ function renderHome() {
       <div class="dash-col">${inArea("right").map(wrap).join("")}</div>
     </div>`;
 
+  startClock();
   $("#h-add").onclick = () => addChooser();
   $$("#view-home [data-wsday]").forEach(c => c.onclick = () => dayModal(c.dataset.wsday));
   $("#due-style-toggle").onclick = () => {
@@ -880,16 +898,94 @@ function courseCardHtml(c) {
     </div>
   </div>`;
 }
+/* Weekly timetable of every course meeting — the shape of your term at a glance. */
+function courseTimetableHtml() {
+  const blocks = [];
+  for (const c of alive(S.courses)) {
+    (c.meetings || []).forEach(m => {
+      if (!m.days?.length || !m.start) return;
+      const start = MINS(m.start);
+      const end = m.end ? Math.max(MINS(m.end), start + 30) : start + 50;
+      for (const d of m.days) blocks.push({ c, m, d, start, end });
+    });
+  }
+  if (!blocks.length) {
+    return `<div class="empty" style="padding:36px">No meeting times yet. Add them to a course and your week appears here.</div>`;
+  }
+  const dayStart = Math.max(0, Math.floor(Math.min(...blocks.map(b => b.start)) / 60) * 60 - 60);
+  const dayEnd = Math.min(24 * 60, Math.ceil(Math.max(...blocks.map(b => b.end)) / 60) * 60 + 60);
+  const H = (dayEnd - dayStart) * PX_PER_MIN;
+
+  let gutter = "";
+  for (let m = dayStart; m <= dayEnd; m += 60) {
+    gutter += `<div class="tt-hr" style="top:${(m - dayStart) * PX_PER_MIN}px">${fmtTime12(String(Math.floor(m / 60)).padStart(2, "0") + ":00")}</div>`;
+  }
+  let rules = "";
+  for (let m = dayStart; m <= dayEnd; m += 60) {
+    rules += `<div class="tt-line" style="top:${(m - dayStart) * PX_PER_MIN}px"></div>`;
+    for (const q of [15, 30, 45]) {
+      if (m + q >= dayEnd) break;
+      rules += `<div class="tt-line q ${q === 30 ? "half" : ""}" style="top:${(m + q - dayStart) * PX_PER_MIN}px"></div>`;
+    }
+  }
+
+  const today = parseDate(todayStr()).getDay();
+  const cols = [0, 1, 2, 3, 4, 5, 6].map(d => {
+    const mine = blocks.filter(b => b.d === d).sort((a, b) => a.start - b.start);
+    layoutLanes(mine);
+    const items = mine.map(b => {
+      const top = (b.start - dayStart) * PX_PER_MIN;
+      const h = (b.end - b.start) * PX_PER_MIN;
+      const w = 100 / b.lanes, l = w * b.lane;
+      const tag = meetKindTag(b.m.kind);
+      const room = b.m.room || b.c.room || "";
+      return `<div class="tt-block" data-course="${b.c.id}"
+        style="top:${top}px;height:${h}px;left:calc(${l}% + 2px);width:calc(${w}% - 4px);
+        background:color-mix(in srgb,${b.c.color} 17%,var(--card));border-left:3px solid ${b.c.color}">
+        <span class="tt-code">${esc(b.c.code || b.c.name)}${tag ? " · " + esc(tag) : ""}</span>
+        <span class="tt-meta">${esc(fmtTime12(b.m.start))}${b.m.end ? "–" + esc(fmtTime12(b.m.end)) : ""}</span>
+        ${room ? `<span class="tt-meta">${esc(room)}</span>` : ""}
+      </div>`;
+    }).join("");
+    return `<div class="tt-col ${d === today ? "today" : ""}">
+      <div class="tt-dayhead">${DOW[d]}</div>
+      <div class="tt-daybody" style="height:${H}px">${rules}${items}</div>
+    </div>`;
+  }).join("");
+
+  return `<div class="card panel tt-wrap">
+    <div class="tt-scroll">
+      <div class="tt-grid">
+        <div class="tt-gutter">
+          <div class="tt-dayhead"></div>
+          <div class="tt-gbody" style="height:${H}px">${gutter}</div>
+        </div>
+        ${cols}
+      </div>
+    </div>
+  </div>`;
+}
 function renderCourses() {
   const courses = alive(S.courses);
+  const mode = UI.courseMode || "cards";
   $("#view-courses").innerHTML = `
     <div class="viewhead">
       <div><h1>Courses</h1><div class="sub">Everything you need to know, one click deep.</div></div>
-      <button class="btn primary" id="c-add">+ Course</button>
+      <div style="display:flex;gap:9px;align-items:center;flex-wrap:wrap">
+        <div class="seg" id="c-seg">
+          <button data-cv="cards" class="${mode === "cards" ? "active" : ""}">Cards</button>
+          <button data-cv="grid" class="${mode === "grid" ? "active" : ""}">Timetable</button>
+        </div>
+        <button class="btn primary" id="c-add">+ Course</button>
+      </div>
     </div>
-    ${courses.length ? `<div class="coursegrid">${courses.map(courseCardHtml).join("")}</div>`
-      : `<div class="empty" style="padding:40px">A blank slate. Add your first course and watch this place come alive.</div>`}`;
+    ${!courses.length
+      ? `<div class="empty" style="padding:40px">A blank slate. Add your first course and watch this place come alive.</div>`
+      : mode === "grid"
+        ? courseTimetableHtml()
+        : `<div class="coursegrid">${courses.map(courseCardHtml).join("")}</div>`}`;
   $("#c-add").onclick = () => courseEditor(null);
+  $$("#c-seg button").forEach(b => b.onclick = () => { UI.courseMode = b.dataset.cv; renderCourses(); });
   $$("#view-courses [data-course]").forEach(r => r.onclick = () => { const c = courseById(r.dataset.course); if (c) courseDetail(c); });
 }
 function courseDetail(c) {
@@ -933,7 +1029,7 @@ function meetingsLabel(meetings) {
       const days = [...m.days].sort((a, b) => a - b).map(d => DAY_LETTERS[d]).join("");
       const time = fmtTime12(m.start) + (m.end ? "–" + fmtTime12(m.end) : "");
       const tag = meetKindTag(m.kind);
-      return (tag ? tag + " " : "") + days + " " + time;
+      return (tag ? tag + " " : "") + days + " " + time + (m.room ? " · " + m.room : "");
     })
     .join(" · ");
 }
@@ -948,7 +1044,7 @@ function courseEditor(c) {
   const isNew = !c;
   c = c || { name: "", code: "", color: COURSE_COLORS[alive(S.courses).length % COURSE_COLORS.length], meetingTimes: "", meetings: [], room: "", instructor: "", email: "", officeHours: "", syllabusUrl: "", grading: "", description: "", textbooks: "", custom: [] };
   let pickedColor = c.color;
-  let meets = (c.meetings || []).map(m => ({ days: [...(m.days || [])], start: m.start || "", end: m.end || "", kind: m.kind || "Lecture" }));
+  let meets = (c.meetings || []).map(m => ({ days: [...(m.days || [])], start: m.start || "", end: m.end || "", kind: m.kind || "Lecture", room: m.room || "" }));
   openModal(`
     <h2>${isNew ? "New course" : "Edit course"}</h2>
     <div class="fieldrow">
@@ -994,6 +1090,7 @@ function courseEditor(c) {
         <input type="time" class="mr-t" data-mi="${i}" data-f="start" value="${esc(m.start)}">
         <span class="hint">–</span>
         <input type="time" class="mr-t" data-mi="${i}" data-f="end" value="${esc(m.end)}">
+        <input class="mr-room" data-mi="${i}" value="${esc(m.room || "")}" placeholder="Room" autocomplete="off">
         <button class="iconbtn" type="button" data-mx="${i}" aria-label="remove"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
       </div>`).join("");
     $$("#ce-meets [data-d]").forEach(b => b.onclick = () => {
@@ -1003,6 +1100,7 @@ function courseEditor(c) {
       renderMeets();
     });
     $$("#ce-meets .mr-kind").forEach(sel => sel.onchange = () => { meets[+sel.dataset.mi].kind = sel.value; });
+    $$("#ce-meets .mr-room").forEach(inp => inp.oninput = () => { meets[+inp.dataset.mi].room = inp.value; });
     $$("#ce-meets .mr-t").forEach(inp => inp.onchange = () => { meets[+inp.dataset.mi][inp.dataset.f] = inp.value; });
     $$("#ce-meets [data-mx]").forEach(b => b.onclick = () => { meets.splice(+b.dataset.mx, 1); renderMeets(); });
   };
@@ -1024,7 +1122,7 @@ function courseEditor(c) {
   $("#ce-save").onclick = () => {
     const name = $("#ce-name").value.trim();
     if (!name) { toast("The course needs a name"); return; }
-    const meetings = meets.filter(m => m.days.length && m.start).map(m => ({ days: [...m.days], start: m.start, end: m.end || "", kind: m.kind || "Lecture" }));
+    const meetings = meets.filter(m => m.days.length && m.start).map(m => ({ days: [...m.days], start: m.start, end: m.end || "", kind: m.kind || "Lecture", room: (m.room || "").trim() }));
     const data = {
       name, code: $("#ce-code").value.trim(), color: pickedColor,
       meetings, meetingTimes: meetingsLabel(meetings), room: $("#ce-room").value.trim(),
@@ -1113,7 +1211,7 @@ function weekDayEntries(day) {
       type, id: r.id, title: r.title, color: r.color || "#8fa3ad",
       start: r.time ? MINS(r.time) : null,
       end: r.endTime ? MINS(r.endTime) : null,
-      timeTxt: timeRange(r), done: !!checks[r.id], raw: r,
+      timeTxt: timeRange(r) + (r.room ? " · " + r.room : ""), done: !!checks[r.id], raw: r,
     });
   }
   for (const a of asg) {
@@ -1171,7 +1269,8 @@ function wkEntryHtml(e, day) {
    a head bar, the nested events indented, then a foot bar with the end time. */
 function wkClassBracketHtml(cls, kids, day) {
   const c = cls.color;
-  const startTxt = cls.raw?.time ? fmtTime12(cls.raw.time) : "";
+  const room = cls.raw?.room ? " · " + cls.raw.room : "";
+  const startTxt = (cls.raw?.time ? fmtTime12(cls.raw.time) : "") + room;
   const endTxt = cls.raw?.endTime ? fmtTime12(cls.raw.endTime) : "";
   return `<div class="wk-span ${cls.done ? "done" : ""}" style="--sc:${esc(c)}">
     <div class="wk-span-head" data-wsched="${cls.id}" data-wday="${day}">
@@ -1679,6 +1778,8 @@ function dailyItems(dow) {
         timed.push({
           id: `crs-${c.id}-${i}`, title: (c.code || c.name) + (tag ? " · " + tag : ""), kind: "class",
           meetKind: m.kind || "Lecture",
+          /* the meeting's own room wins; the course room is the fallback */
+          room: m.room || c.room || "",
           time: m.start, endTime: m.end || "", color: c.color, courseId: c.id, isCourse: true, order: 0,
         });
       }
@@ -1739,6 +1840,11 @@ function schedTimelineHtml(date, ckAttr, includeAnytime = true) {
       <span class="tl-hlabel">${fmtTime12(String(Math.floor(m / 60)).padStart(2, "0") + ":00")}</span>
       <span class="tl-hline"></span>
     </div>`;
+    /* faint quarter-hour rules so you can eyeball 15-minute offsets */
+    for (const q of [15, 30, 45]) {
+      if (m + q >= dayEnd) break;
+      hourLines += `<div class="tl-quarter ${q === 30 ? "half" : ""}" style="top:${(m + q - dayStart) * PX_PER_MIN}px"></div>`;
+    }
   }
 
   /* "now" marker, only when viewing today */
@@ -1770,7 +1876,7 @@ function schedTimelineHtml(date, ckAttr, includeAnytime = true) {
       <span class="ck ${done ? "on" : ""}" ${ckAttr}="${r.id}"><svg viewBox="0 0 24 24"><path d="M4 12.5 10 18.5 20 6"/></svg></span>
       <span class="tl-body">
         <span class="tl-title">${esc(r.title)}</span>
-        <span class="tl-time">${timeRange(r)}</span>
+        <span class="tl-time">${timeRange(r)}${r.room ? ` · ${esc(r.room)}` : ""}</span>
       </span>
     </div>`;
   }).join("");
@@ -2409,7 +2515,7 @@ function classEventBody(course, m) {
   const byday = [...m.days].sort((a, b) => a - b).map(d => RRULE_DAYS[d]).join(",");
   return {
     summary: (course.code || course.name) + (tag ? " · " + tag : ""),
-    location: course.room || "",
+    location: m.room || course.room || "",
     description: [course.name, course.instructor, m.kind || "Lecture"].filter(Boolean).join(" · "),
     start: { dateTime: startDay + "T" + m.start + ":00", timeZone: tz },
     end: { dateTime: endDay + "T" + end + ":00", timeZone: tz },
