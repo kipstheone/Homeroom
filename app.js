@@ -2,7 +2,7 @@
 /* ============================================================
    ODO — app logic
    ============================================================ */
-const APP_VERSION = "v1.2.0";
+const APP_VERSION = "v1.3.0";
 
 /* ---------- tiny helpers ---------- */
 const $ = s => document.querySelector(s);
@@ -105,6 +105,7 @@ const DEFAULTS = {
     theme: "auto", palette: "hearth", look: "paper", dashLayout: null, banner: "", userName: "", dueStyle: "dot", todoStyle: "dot",
     testLookahead: 14, weeksShown: 1,
     gcalClientId: "", gcalCalendarId: "", gcalHint: "", gcalReminderMinutes: 1440,
+    gcalClassCalendarId: "", gcalClassReminderMinutes: 15, gcalSyncClasses: true,
     supaUrl: "", supaKey: "", syncId: "",
   },
 };
@@ -917,7 +918,7 @@ function courseDetail(c) {
   $("#cd-close").onclick = closeModal;
   $("#cd-edit").onclick = () => courseEditor(c);
   $("#cd-del").onclick = () => confirmBox("Delete course?", `"${c.name}" will be removed. Its assignments stay, just uncategorized.`, "Delete", () => {
-    c.deleted = true; c.updatedAt = Date.now(); save(); render(); toast("Course removed");
+    c.deleted = true; c.updatedAt = Date.now(); save(); gcalQueuePush(); render(); toast("Course removed");
   }, true);
 }
 const DAY_LETTERS = ["Su", "M", "Tu", "W", "Th", "F", "Sa"];
@@ -1038,7 +1039,7 @@ function courseEditor(c) {
     };
     if (isNew) S.courses.push({ id: uid(), deleted: false, ...data, updatedAt: Date.now() });
     else Object.assign(c, data, { updatedAt: Date.now() });
-    save(); closeModal(); render(); toast(isNew ? "Course added" : "Saved");
+    save(); gcalQueuePush(); closeModal(); render(); toast(isNew ? "Course added" : "Saved");
   };
   $("#ce-name").focus();
 }
@@ -1099,43 +1100,114 @@ function weekDayItems(day) {
     tasks: alive(S.tasks).filter(t => t.day === day).sort((a, b) => a.order - b.order),
   };
 }
+/* At the same clock time an assignment deadline matters before a class starts. */
+const WK_ORDER = { asg: 0, todo: 1, routine: 2, class: 3 };
+/* Flatten a day into one chronological list of comparable entries. */
+function weekDayEntries(day) {
+  const { timed, anytime, asg, tasks } = weekDayItems(day);
+  const checks = S.routineChecks[day] || {};
+  const out = [];
+  for (const r of [...timed, ...anytime]) {
+    const type = r.kind === "class" ? "class" : "routine";
+    out.push({
+      type, id: r.id, title: r.title, color: r.color || "#8fa3ad",
+      start: r.time ? MINS(r.time) : null,
+      end: r.endTime ? MINS(r.endTime) : null,
+      timeTxt: timeRange(r), done: !!checks[r.id], raw: r,
+    });
+  }
+  for (const a of asg) {
+    out.push({
+      type: "asg", id: a.id, title: a.title, color: typeColor(a.type),
+      start: a.time ? MINS(a.time) : null, end: null,
+      timeTxt: a.type + (a.time ? " · " + fmtTime12(a.time) : ""),
+      done: a.status === "Done", raw: a,
+    });
+  }
+  for (const t of tasks) {
+    const tag = (t.tags || [])[0];
+    out.push({
+      type: "todo", id: t.id, title: t.title,
+      color: tag ? tagColor(tag) : (t.color || "#8fa3ad"),
+      start: null, end: null, timeTxt: tag || "", done: t.done, raw: t,
+    });
+  }
+  const untimed = out.filter(e => e.start == null)
+    .sort((a, b) => WK_ORDER[a.type] - WK_ORDER[b.type]);
+  const timedSorted = out.filter(e => e.start != null)
+    .sort((a, b) => a.start - b.start || WK_ORDER[a.type] - WK_ORDER[b.type]);
+  return { untimed, timed: timedSorted };
+}
+function wkEntryHtml(e, day) {
+  const c = e.color;
+  if (e.type === "class") {
+    return `<div class="wk-item cls ${e.done ? "done" : ""}" data-wsched="${e.id}" data-wday="${day}" style="background:${esc(c)};color:#fff">
+      <span class="wk-t">${esc(e.title)}</span>
+      ${e.timeTxt ? `<span class="wk-time">${esc(e.timeTxt)}</span>` : ""}
+    </div>`;
+  }
+  if (e.type === "asg") {
+    return `<div class="wk-item asg ${e.done ? "done" : ""}" data-wasg="${e.id}"
+      style="background:color-mix(in srgb,${c} 13%,var(--card));border-left:3px solid ${c}">
+      <span class="wk-t">${esc(e.title)}</span>
+      <span class="wk-time">${esc(e.timeTxt)}</span>
+    </div>`;
+  }
+  if (e.type === "todo") {
+    return `<div class="wk-item todo ${e.done ? "done" : ""}" data-wtask="${e.id}"
+      style="background:color-mix(in srgb,${c} 13%,var(--card));border-left:3px solid ${c}">
+      <span class="ck ${e.done ? "on" : ""}" data-wtck="${e.id}"><svg viewBox="0 0 24 24"><path d="M4 12.5 10 18.5 20 6"/></svg></span>
+      <span class="wk-t">${esc(e.title)}</span>
+      ${e.timeTxt ? `<span class="wk-time">${esc(e.timeTxt)}</span>` : ""}
+    </div>`;
+  }
+  return `<div class="wk-item ${e.done ? "done" : ""}" data-wsched="${e.id}" data-wday="${day}"
+    style="background:color-mix(in srgb,${c} 13%,var(--card));border-left:3px solid ${c}">
+    <span class="wk-t">${esc(e.title)}</span>
+    ${e.timeTxt ? `<span class="wk-time">${esc(e.timeTxt)}</span>` : ""}
+  </div>`;
+}
+/* A class that has other events inside its time range is drawn as a bracket:
+   a head bar, the nested events indented, then a foot bar with the end time. */
+function wkClassBracketHtml(cls, kids, day) {
+  const c = cls.color;
+  const startTxt = cls.raw?.time ? fmtTime12(cls.raw.time) : "";
+  const endTxt = cls.raw?.endTime ? fmtTime12(cls.raw.endTime) : "";
+  return `<div class="wk-span ${cls.done ? "done" : ""}" style="--sc:${esc(c)}">
+    <div class="wk-span-head" data-wsched="${cls.id}" data-wday="${day}">
+      <span class="wk-t">${esc(cls.title)}</span>
+      <span class="wk-time">${esc(startTxt)}</span>
+    </div>
+    <div class="wk-span-kids">${kids.map(k => wkEntryHtml(k, day)).join("")}</div>
+    <div class="wk-span-foot" data-wsched="${cls.id}" data-wday="${day}">
+      <span class="wk-t">ends</span>
+      <span class="wk-time">${esc(endTxt)}</span>
+    </div>
+  </div>`;
+}
 function weekDayColHtml(day) {
   const isToday = day === todayStr();
   const d = parseDate(day);
-  const { timed, anytime, asg, tasks } = weekDayItems(day);
-  const checks = S.routineChecks[day] || {};
-  const empty = !timed.length && !anytime.length && !asg.length && !tasks.length;
+  const { untimed, timed } = weekDayEntries(day);
+  const empty = !untimed.length && !timed.length;
 
-  const classRows = [...timed, ...anytime].map(r => {
-    const done = !!checks[r.id];
-    const col = r.color || "var(--accent)";
-    const isClass = r.kind === "class";
-    return `<div class="wk-item ${isClass ? "cls" : ""} ${done ? "done" : ""}" data-wsched="${r.id}" data-wday="${day}"
-      style="${isClass ? `background:${esc(col)};color:#fff` : `background:color-mix(in srgb,${esc(col)} 13%,var(--card));border-left:3px solid ${esc(col)}`}">
-      <span class="wk-t">${esc(r.title)}</span>
-      ${r.time ? `<span class="wk-time">${timeRange(r)}</span>` : ""}
-    </div>`;
-  }).join("");
-
-  const asgRows = asg.map(a => {
-    const tc = typeColor(a.type);
-    const done = a.status === "Done";
-    return `<div class="wk-item asg ${done ? "done" : ""}" data-wasg="${a.id}"
-      style="background:color-mix(in srgb,${tc} 13%,var(--card));border-left:3px solid ${tc}">
-      <span class="wk-t">${esc(a.title)}</span>
-      <span class="wk-time">${esc(a.type)}${a.time ? " · " + fmtTime12(a.time) : ""}</span>
-    </div>`;
-  }).join("");
-
-  const taskRows = tasks.map(t => {
-    const tag = (t.tags || [])[0];
-    const tc = tag ? tagColor(tag) : (t.color || "#8fa3ad");
-    return `<div class="wk-item todo ${t.done ? "done" : ""}" data-wtask="${t.id}"
-      style="background:color-mix(in srgb,${tc} 13%,var(--card));border-left:3px solid ${tc}">
-      <span class="ck ${t.done ? "on" : ""}" data-wtck="${t.id}"><svg viewBox="0 0 24 24"><path d="M4 12.5 10 18.5 20 6"/></svg></span>
-      <span class="wk-t">${esc(t.title)}</span>
-    </div>`;
-  }).join("");
+  /* group events that fall inside a class's range under that class */
+  let rows = "";
+  const consumed = new Set();
+  timed.forEach((e, i) => {
+    if (consumed.has(i)) return;
+    if (e.type === "class" && e.end != null) {
+      const kids = [];
+      for (let j = i + 1; j < timed.length; j++) {
+        const o = timed[j];
+        if (consumed.has(j) || o.start >= e.end) continue;
+        if (o.start > e.start) { kids.push(o); consumed.add(j); }
+      }
+      rows += kids.length ? wkClassBracketHtml(e, kids, day) : wkEntryHtml(e, day);
+      return;
+    }
+    rows += wkEntryHtml(e, day);
+  });
 
   return `<div class="wk-col ${isToday ? "today" : ""}" data-wcol="${day}">
     <div class="wk-head">
@@ -1143,7 +1215,8 @@ function weekDayColHtml(day) {
       <span class="wk-dd">${MONTHS[d.getMonth()].slice(0, 3)} ${d.getDate()}</span>
     </div>
     <div class="wk-body">
-      ${classRows}${asgRows}${taskRows}
+      ${untimed.map(e => wkEntryHtml(e, day)).join("")}
+      ${rows}
       ${empty ? `<div class="wk-empty">—</div>` : ""}
       <button class="wk-add" data-wadd="${day}">+</button>
     </div>
@@ -2291,6 +2364,90 @@ async function ensureCalendar() {
   persist();
   return id;
 }
+/* Separate calendar so class blocks can be toggled off in Google without
+   hiding assignment deadlines. */
+const CLASS_CAL_NAME = "ODO - Classes";
+async function ensureClassCalendar() {
+  if (S.settings.gcalClassCalendarId) return S.settings.gcalClassCalendarId;
+  const list = await gfetch("/users/me/calendarList?maxResults=250");
+  const found = (list?.items || []).find(c => c.summary === CLASS_CAL_NAME);
+  let id = found?.id;
+  if (!id) {
+    const created = await gfetch("/calendars", {
+      method: "POST",
+      body: JSON.stringify({ summary: CLASS_CAL_NAME, description: "Your class meeting times, kept in sync by ODO." }),
+    });
+    id = created?.id;
+  }
+  if (!id) throw new Error("no class calendar");
+  S.settings.gcalClassCalendarId = id;
+  persist();
+  return id;
+}
+const RRULE_DAYS = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
+/* First date on/after `from` whose weekday is in `days`. */
+function firstOccurrence(days, from) {
+  for (let i = 0; i < 7; i++) {
+    const d = addDays(from, i);
+    if (days.includes(parseDate(d).getDay())) return d;
+  }
+  return from;
+}
+function classEventBody(course, m) {
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const remind = S.settings.gcalClassReminderMinutes;
+  const tag = meetKindTag(m.kind);
+  const startDay = firstOccurrence(m.days, todayStr());
+  const end = m.end || (() => {
+    const [h, mi] = m.start.split(":").map(Number);
+    const d = new Date(2000, 0, 1, h, mi + 50);
+    return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+  })();
+  /* end-before-start means it runs past midnight — push the end to the next day */
+  const endDay = MINS(end) <= MINS(m.start) ? addDays(startDay, 1) : startDay;
+  const until = fmtDate(addDays(startDay, 365)).replace(/-/g, "") + "T235959Z";
+  const byday = [...m.days].sort((a, b) => a - b).map(d => RRULE_DAYS[d]).join(",");
+  return {
+    summary: (course.code || course.name) + (tag ? " · " + tag : ""),
+    location: course.room || "",
+    description: [course.name, course.instructor, m.kind || "Lecture"].filter(Boolean).join(" · "),
+    start: { dateTime: startDay + "T" + m.start + ":00", timeZone: tz },
+    end: { dateTime: endDay + "T" + end + ":00", timeZone: tz },
+    recurrence: [`RRULE:FREQ=WEEKLY;BYDAY=${byday};UNTIL=${until}`],
+    /* exactly one reminder, so Google doesn't stack its own defaults on top */
+    reminders: (remind == null || remind < 0)
+      ? { useDefault: false, overrides: [] }
+      : { useDefault: false, overrides: [{ method: "popup", minutes: remind }] },
+    extendedProperties: { private: { app: "odo", kind: "class", courseId: course.id } },
+  };
+}
+/* Rebuilds the class calendar from the courses in the app. Course meetings are
+   the source of truth — edits made in Google get overwritten. */
+async function gcalPushClasses(classCalId) {
+  const wanted = new Map();  /* key -> {course, meeting} */
+  for (const c of alive(S.courses)) {
+    (c.meetings || []).forEach((m, i) => {
+      if (m.days?.length && m.start) wanted.set(`${c.id}::${i}`, { c, m });
+    });
+  }
+  const map = S.settings.gcalClassEventIds || {};
+  /* remove events for meetings that no longer exist */
+  for (const key of Object.keys(map)) {
+    if (!wanted.has(key)) {
+      try { await gfetch(`/calendars/${encodeURIComponent(classCalId)}/events/${encodeURIComponent(map[key])}`, { method: "DELETE" }); } catch (e) { }
+      delete map[key];
+    }
+  }
+  for (const [key, { c, m }] of wanted) {
+    const body = JSON.stringify(classEventBody(c, m));
+    let saved = null;
+    if (map[key]) saved = await gfetch(`/calendars/${encodeURIComponent(classCalId)}/events/${encodeURIComponent(map[key])}`, { method: "PUT", body });
+    if (!saved) saved = await gfetch(`/calendars/${encodeURIComponent(classCalId)}/events`, { method: "POST", body });
+    if (saved?.id) map[key] = saved.id;
+  }
+  S.settings.gcalClassEventIds = map;
+  persist();
+}
 function parseEvWhen(ev) {
   const st = ev.start || {};
   if (st.date) return { due: st.date, time: "" };
@@ -2415,6 +2572,11 @@ async function gcalSync(mode = false) {
     const calId = await ensureCalendar();
     await gcalPull(calId);
     await gcalPush(calId);
+    if (S.settings.gcalSyncClasses !== false) {
+      /* class blocks live on their own calendar and never pull back into the app */
+      try { await gcalPushClasses(await ensureClassCalendar()); }
+      catch (e) { console.warn("class calendar", e); }
+    }
     persist();
     scheduleCloudPush();
     LAST_SYNC_ERR.gcal = "";
@@ -2746,6 +2908,23 @@ function renderSettings() {
         </select>
       </div>
       <div class="hint" style="margin-top:4px">Applies to all assignments pushed to Google Calendar.</div>
+
+      <div class="desc" style="margin-top:16px">Class meeting times sync separately to a <b>${esc(CLASS_CAL_NAME)}</b> calendar, so you can hide class blocks in Google without losing your deadlines.</div>
+      <div class="set-inline"><span>Sync class times</span>
+        <button class="btn small ${s.gcalSyncClasses !== false ? "primary" : ""}" id="st-gcal-classtog">${s.gcalSyncClasses !== false ? "On" : "Off"}</button>
+      </div>
+      <div class="set-inline"><span>Class reminder</span>
+        <select id="st-gcal-classremind" style="border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);border-radius:9px;padding:6px 10px;font-weight:700">
+          <option value="-1" ${(s.gcalClassReminderMinutes ?? 15) < 0 ? "selected" : ""}>No reminder</option>
+          <option value="0" ${(s.gcalClassReminderMinutes ?? 15) === 0 ? "selected" : ""}>At start time</option>
+          <option value="5" ${(s.gcalClassReminderMinutes ?? 15) === 5 ? "selected" : ""}>5 minutes before</option>
+          <option value="10" ${(s.gcalClassReminderMinutes ?? 15) === 10 ? "selected" : ""}>10 minutes before</option>
+          <option value="15" ${(s.gcalClassReminderMinutes ?? 15) === 15 ? "selected" : ""}>15 minutes before</option>
+          <option value="30" ${(s.gcalClassReminderMinutes ?? 15) === 30 ? "selected" : ""}>30 minutes before</option>
+          <option value="60" ${(s.gcalClassReminderMinutes ?? 15) === 60 ? "selected" : ""}>1 hour before</option>
+        </select>
+      </div>
+      <div class="hint" style="margin-top:4px">Exactly one reminder per class — nothing fires earlier than this.</div>
       <div style="display:flex;gap:9px;flex-wrap:wrap;align-items:center;margin-top:10px">
         <button class="btn primary" id="st-gconnect">${gcalLinked() ? "Sync now" : "Connect Google"}</button>
         ${gcalLinked() ? `<button class="btn ghost danger" id="st-gdisc">Disconnect</button>` : ""}
@@ -2822,6 +3001,17 @@ function renderSettings() {
   /* auto-save sync fields as they're typed/pasted, so nothing is lost if the view re-renders */
   $("#st-gcid").oninput = e => { s.gcalClientId = e.target.value.trim(); tokenClient = null; persist(); };
   $("#st-gcal-remind").onchange = e => { s.gcalReminderMinutes = +e.target.value; persist(); toast("Reminder updated"); };
+  /* class events must be rewritten for a reminder change to reach Google */
+  $("#st-gcal-classremind").onchange = e => {
+    s.gcalClassReminderMinutes = +e.target.value;
+    persist(); gcalQueuePush(); toast("Class reminder updated");
+  };
+  $("#st-gcal-classtog").onclick = () => {
+    s.gcalSyncClasses = s.gcalSyncClasses === false;
+    persist(); renderSettings();
+    if (s.gcalSyncClasses) { gcalQueuePush(); toast("Class times will sync"); }
+    else toast("Class sync paused — existing events stay in Google");
+  };
   $("#st-surl").oninput = e => { s.supaUrl = e.target.value.trim(); persist(); };
   $("#st-skey").oninput = e => { s.supaKey = e.target.value.trim(); persist(); };
   $("#st-sid").oninput = e => { s.syncId = e.target.value.trim(); persist(); };

@@ -591,31 +591,52 @@ html{background:var(--bg)}
 .tl-block.done .tl-title{text-decoration:line-through}
 .tl-anytime{margin-bottom:10px}
 
-/* ---------- week agenda grid (Week Board & To-dos) ---------- */
-.wk-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:9px;align-items:start}
-.wk-col{background:var(--card);border:1.5px solid var(--line);border-radius:var(--r);overflow:hidden;min-width:0}
+/* ---------- week agenda (Week Board & To-dos) ----------
+   One row per day at every width — a 7-across grid squeezes titles to nothing,
+   and the vertical form leaves room for classes to jut into the left gutter. */
+.wk-grid{display:flex;flex-direction:column;gap:8px}
+.wk-col{background:var(--card);border:1.5px solid var(--line);border-radius:var(--r);
+  display:grid;grid-template-columns:92px minmax(0,1fr);overflow:hidden}
 .wk-col.today{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
-.wk-head{padding:8px 10px;border-bottom:1.5px solid var(--line);display:flex;flex-direction:column;gap:1px;background:var(--card-2)}
+.wk-head{padding:11px 12px;border-right:1.5px solid var(--line);background:var(--card-2);
+  display:flex;flex-direction:column;gap:1px;align-content:flex-start}
 .wk-col.today .wk-head{background:var(--accent-soft)}
-.wk-dn{font-size:12px;font-weight:800;letter-spacing:.03em}
+.wk-dn{font-size:12.5px;font-weight:800;letter-spacing:.03em}
 .wk-col.today .wk-dn{color:var(--accent-ink)}
 .wk-dd{font-size:11px;font-weight:700;color:var(--ink-faint)}
-.wk-body{padding:7px;display:flex;flex-direction:column;gap:5px;min-height:78px}
-.wk-item{display:flex;align-items:center;gap:6px;border-radius:7px;padding:5px 8px;font-size:12.5px;cursor:pointer;min-width:0}
+/* left padding is the gutter classes reach into */
+.wk-body{padding:9px 11px 9px 24px;display:flex;flex-direction:column;gap:5px;min-width:0}
+.wk-item{display:flex;align-items:center;gap:8px;border-radius:8px;padding:6px 11px;font-size:13px;cursor:pointer;min-width:0}
 .wk-item:hover{filter:brightness(.97)}
 .wk-t{font-weight:700;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
-.wk-time{font-size:10px;font-weight:800;opacity:.75;white-space:nowrap}
+.wk-time{font-size:10.5px;font-weight:800;opacity:.75;white-space:nowrap;flex-shrink:0}
 .wk-item.cls .wk-time{opacity:.9}
 .wk-item.done{opacity:.5}
 .wk-item.done .wk-t{text-decoration:line-through}
 .wk-item .ck{width:15px;height:15px;border-radius:5px;flex-shrink:0}
 .wk-item .ck svg{width:9px;height:9px}
-.wk-empty{font-size:12px;color:var(--ink-faint);text-align:center;padding:6px 0}
-.wk-add{font-size:15px;font-weight:800;color:var(--ink-faint);border:1.5px dashed transparent;border-radius:7px;padding:2px 0;margin-top:auto}
+/* classes step out into the gutter so they read as the frame of the day */
+.wk-item.cls{margin-left:-15px}
+/* to-dos sit inset from everything else */
+.wk-item.todo{margin-left:16px;margin-right:8px}
+.wk-empty{font-size:12px;color:var(--ink-faint);padding:2px 0}
+.wk-add{font-size:15px;font-weight:800;color:var(--ink-faint);border:1.5px dashed transparent;
+  border-radius:7px;padding:2px 0;margin-top:2px;align-self:flex-start;width:34px}
 .wk-col:hover .wk-add{border-color:var(--line-strong)}
 .wk-add:hover{color:var(--accent-ink);background:var(--bg-soft)}
 .wk-someday{display:flex;flex-wrap:wrap;gap:6px}
-.wk-someday .wk-item{flex:0 1 220px}
+.wk-someday .wk-item{flex:0 1 260px;margin:0}
+
+/* a class wrapping events that happen during it */
+.wk-span{margin-left:-15px;border-left:4px solid var(--sc);border-radius:9px;
+  background:color-mix(in srgb,var(--sc) 9%,var(--card));overflow:hidden}
+.wk-span.done{opacity:.5}
+.wk-span-head,.wk-span-foot{display:flex;align-items:center;gap:8px;padding:6px 11px;
+  background:var(--sc);color:#fff;cursor:pointer;font-size:13px}
+.wk-span-foot{font-size:11.5px;opacity:.92}
+.wk-span-foot .wk-t{font-weight:700;text-transform:uppercase;letter-spacing:.05em;font-size:10px;opacity:.85}
+.wk-span-kids{padding:6px 9px 6px 20px;display:flex;flex-direction:column;gap:5px}
+.wk-span-kids .wk-item{margin-left:0;margin-right:0}
 
 /* ---------- dashboard week strip ---------- */
 .ws-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px}
@@ -720,12 +741,17 @@ html{background:var(--bg)}
   .board{flex-direction:column;min-width:0}
   .daycol{width:100%;min-height:96px}
   .sched-row .hr{width:42px}
-  /* week agenda: one day per row on phones, header beside the items */
-  .wk-grid{grid-template-columns:1fr;gap:7px}
-  .wk-col{display:grid;grid-template-columns:74px minmax(0,1fr)}
-  .wk-head{border-bottom:none;border-right:1.5px solid var(--line);flex-direction:row;align-items:baseline;gap:6px;padding:9px 8px}
-  .wk-body{min-height:0;padding:6px}
-  .wk-add{margin-top:2px}
+  /* week agenda: narrower day gutter, less indent to protect title space */
+  .wk-grid{gap:7px}
+  .wk-col{grid-template-columns:62px minmax(0,1fr)}
+  .wk-head{padding:9px 7px}
+  .wk-dn{font-size:11.5px}
+  .wk-body{padding:7px 8px 7px 17px;gap:4px}
+  .wk-item{padding:5px 9px;font-size:12.5px;gap:6px}
+  .wk-item.cls{margin-left:-11px}
+  .wk-item.todo{margin-left:10px;margin-right:0}
+  .wk-span{margin-left:-11px}
+  .wk-span-kids{padding:5px 7px 5px 13px}
   .wk-someday .wk-item{flex:1 1 100%}
   /* week strip stays 7 across but goes lean */
   .ws-grid{gap:3px}
