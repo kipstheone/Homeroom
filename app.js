@@ -2,7 +2,7 @@
 /* ============================================================
    ODO — app logic
    ============================================================ */
-const APP_VERSION = "v1.4.0";
+const APP_VERSION = "v1.5.0";
 
 /* ---------- tiny helpers ---------- */
 const $ = s => document.querySelector(s);
@@ -40,9 +40,18 @@ function relDay(s) {
 
 /* ---------- constants ---------- */
 const TYPES = ["Homework", "Quiz", "Test", "Project", "Paper", "Reading", "Lab", "Personal", "Other"];
+/* Hues spread right around the wheel so no two categories read as the same
+   color at a glance — the old set clustered in purple/pink and green/teal. */
 const TYPE_COLOR_DEFAULTS = {
-  Test: "#e2654f", Quiz: "#d9a43c", Homework: "#56a7da", Project: "#9b82e2",
-  Paper: "#b96fcd", Reading: "#5fb36a", Lab: "#45b6a1", Personal: "#e272b2", Other: "#8fa3ad",
+  Test: "#c93b3b",      /* red      */
+  Quiz: "#dd8420",      /* orange   */
+  Personal: "#7fa32b",  /* lime     */
+  Reading: "#4a9c3f",   /* green    */
+  Lab: "#12a08b",       /* teal     */
+  Homework: "#3b8fd4",  /* blue     */
+  Project: "#7d5bd0",   /* violet   */
+  Paper: "#c8489a",     /* magenta  */
+  Other: "#9a9088",     /* warm gray — deliberately desaturated */
 };
 const typeColor = t => (S.typeColors && S.typeColors[t]) || TYPE_COLOR_DEFAULTS[t] || TYPE_COLOR_DEFAULTS.Other;
 const allTypes = () => [...TYPES, ...(S.customTypes || []).map(x => x.name)];
@@ -131,6 +140,9 @@ const alive = arr => arr.filter(x => !x.deleted);
 const courseById = id => S.courses.find(c => c.id === id && !c.deleted);
 const courseLabel = id => { const c = courseById(id); return c ? (c.code || c.name) : "No course"; };
 const courseColor = id => { const c = courseById(id); return c ? c.color : "#9a8f7b"; };
+/* Row highlights follow the course so a MATH row never looks like a CSE row.
+   Assignments with no course fall back to their category color. */
+const asgAccent = a => a.courseId && courseById(a.courseId) ? courseColor(a.courseId) : typeColor(a.type);
 
 /* runtime ui state (not persisted) */
 const UI = {
@@ -237,6 +249,12 @@ const typeGlyph = (t, sz = 10) =>
 const typeChip = (t, sz = 9) => {
   const c = typeColor(t);
   return `<span class="chip" style="background:color-mix(in srgb, ${c} 18%, var(--card));color:color-mix(in srgb, ${c} 62%, var(--ink))">${typeGlyph(t, sz)}${esc(t)}</span>`;
+};
+/* Course chip tinted with the course's own color. */
+const courseChip = id => {
+  const c = courseById(id);
+  if (!c) return "";
+  return `<span class="chip" style="background:color-mix(in srgb, ${c.color} 20%, var(--card));color:color-mix(in srgb, ${c.color} 66%, var(--ink))">${esc(c.code || c.name)}</span>`;
 };
 function typeColorEditor() {
   const all = allTypes();
@@ -462,7 +480,7 @@ function dueRowHtml(a) {
   const dd = dayDiff(todayStr(), a.due);
   const urgent = a.status !== "Done" && dd <= 0;
   const whenTxt = (a.status !== "Done" && dd === 0) ? dueTodayTxt(a.type) : relDay(a.due);
-  const tc = typeColor(a.type);
+  const tc = asgAccent(a);
   const fill = S.settings.dueStyle === "fill";
   const rowStyle = fill ? ` style="background:color-mix(in srgb, ${tc} 14%, var(--card));border-color:color-mix(in srgb, ${tc} 38%, var(--line))"` : "";
   return `<div class="duerow ${a.status === "Done" ? "done" : ""}" data-asg="${a.id}"${rowStyle}>
@@ -500,14 +518,14 @@ function dashCalHtml() {
     const allEvs = [...asg, ...tasks];
     /* event chips: assignments show type glyph, tasks show a small circle */
     const chips = [
-      ...asg.slice(0, 2).map(a => `<span class="calev ${a.status === "Done" ? "struck" : ""}" style="background:${typeColor(a.type)}">${typeGlyph(a.type, 9)}${esc(a.title)}</span>`),
+      ...asg.slice(0, 2).map(a => `<span class="calev ${a.status === "Done" ? "struck" : ""}" style="background:${asgAccent(a)}">${typeGlyph(a.type, 9)}${esc(a.title)}</span>`),
       ...(UI.dashCalTodos ? tasks.slice(0, Math.max(0, 2 - asg.length)).map(t => {
         const tc = (t.tags || [])[0] ? tagColor(t.tags[0]) : (t.color || "#8fa3ad");
         return `<span class="calev ${t.done ? "struck" : ""}" style="background:${tc}">◉ ${esc(t.title)}</span>`;
       }) : []),
     ];
     const dotbar = [
-      ...asg.slice(0, 6).map(a => `<span class="evdot" style="background:${typeColor(a.type)};${a.status === "Done" ? "opacity:.35" : ""}"></span>`),
+      ...asg.slice(0, 6).map(a => `<span class="evdot" style="background:${asgAccent(a)};${a.status === "Done" ? "opacity:.35" : ""}"></span>`),
       ...(UI.dashCalTodos ? tasks.slice(0, Math.max(0, 6 - asg.length)).map(t => {
         const tc = (t.tags || [])[0] ? tagColor(t.tags[0]) : (t.color || "#8fa3ad");
         return `<span class="evdot" style="background:${tc};${t.done ? "opacity:.35" : ""}"></span>`;
@@ -553,7 +571,7 @@ function dashWeekStripHtml() {
     const { timed, anytime, asg, tasks } = weekDayItems(day);
     const pills = [
       ...[...timed, ...anytime].map(r => ({ t: r.title, c: r.color || "#8fa3ad", solid: r.kind === "class", done: !!(S.routineChecks[day] || {})[r.id] })),
-      ...asg.map(a => ({ t: a.title, c: typeColor(a.type), solid: false, done: a.status === "Done" })),
+      ...asg.map(a => ({ t: a.title, c: asgAccent(a), solid: false, done: a.status === "Done" })),
       ...tasks.map(t => {
         const tag = (t.tags || [])[0];
         return { t: t.title, c: tag ? tagColor(tag) : (t.color || "#8fa3ad"), solid: false, done: t.done };
@@ -1157,7 +1175,7 @@ function taskCardHtml(t) {
 }
 function mainCardHtml(a) {
   const done = a.status === "Done";
-  const tc = typeColor(a.type);
+  const tc = asgAccent(a);
   return `<div class="tk main ${done ? "done" : ""}" data-id="${a.id}" data-kind="main" style="background:color-mix(in srgb, ${tc} 15%, var(--card));border-color:color-mix(in srgb, ${tc} 50%, var(--line));border-left:4px solid ${tc}">
     <span class="ck ${done ? "on" : ""}"><svg viewBox="0 0 24 24"><path d="M4 12.5 10 18.5 20 6"/></svg></span>
     <span class="t" style="color:color-mix(in srgb, ${tc} 55%, var(--ink))">${esc(a.title)}<span class="sub" style="color:color-mix(in srgb, ${tc} 60%, var(--ink))">${typeGlyph(a.type, 8)} ${esc(a.type.toUpperCase())}${a.courseId ? " · " + esc(courseLabel(a.courseId)) : ""}${a.time ? " · " + fmtTime12(a.time) : ""}</span></span>
@@ -1216,7 +1234,7 @@ function weekDayEntries(day) {
   }
   for (const a of asg) {
     out.push({
-      type: "asg", id: a.id, title: a.title, color: typeColor(a.type),
+      type: "asg", id: a.id, title: a.title, color: asgAccent(a),
       start: a.time ? MINS(a.time) : null, end: null,
       timeTxt: a.type + (a.time ? " · " + fmtTime12(a.time) : ""),
       done: a.status === "Done", raw: a,
@@ -1972,7 +1990,7 @@ function renderRoutine() {
       <h2 style="font-size:16px;margin:22px 0 10px;color:var(--ink-soft)">Also on this day</h2>
       <div class="routlist">
         ${asg.map(a => {
-          const atc = typeColor(a.type);
+          const atc = asgAccent(a);
           return `<div class="routitem event mainasg ${a.status === "Done" ? "done" : ""}" data-asg="${a.id}" style="border-left-color:${atc};background:color-mix(in srgb,${atc} 10%,var(--card))">
             <span class="ck ${a.status === "Done" ? "on" : ""}" data-ack="${a.id}"><svg viewBox="0 0 24 24"><path d="M4 12.5 10 18.5 20 6"/></svg></span>
             <div class="body"><div class="t">${esc(a.title)}</div><div class="meta">${esc(a.type)}${a.courseId ? " · " + esc(courseLabel(a.courseId)) : ""}${a.time ? " · " + fmtTime12(a.time) : ""}</div></div>
@@ -2174,11 +2192,11 @@ function renderCalTable() {
       ${list.length ? list.map(a => {
         const done = a.status === "Done";
         const dl = done ? null : daysLeftLabel(a.due, dueTodayTxt(a.type));
-        const tc = typeColor(a.type);
-        return `<div class="todo-row ${done ? "done" : ""}" data-asg="${a.id}" style="background:color-mix(in srgb, ${tc} 10%, var(--card))">
+        const ac = asgAccent(a);
+        return `<div class="todo-row ${done ? "done" : ""}" data-asg="${a.id}" style="background:color-mix(in srgb, ${ac} 10%, var(--card))">
           <span class="ck ${done ? "on" : ""}" data-ack="${a.id}" style="width:19px;height:19px"><svg viewBox="0 0 24 24"><path d="M4 12.5 10 18.5 20 6"/></svg></span>
           <span class="tt">${esc(a.title)}</span>
-          <span class="tags">${a.courseId ? `<span class="chip c-faint">${esc(courseLabel(a.courseId))}</span>` : ""}${typeChip(a.type)}</span>
+          <span class="tags">${a.courseId ? courseChip(a.courseId) : ""}${typeChip(a.type)}</span>
           <span class="due-d">${niceDate(a.due)}${a.time ? " " + fmtTime12(a.time) : ""}</span>
           <span class="left-d ${dl ? dl.cls : ""}">
             ${done ? `<button class="del-row" data-adel="${a.id}">Delete</button>` : dl ? dl.txt : "—"}
@@ -2241,9 +2259,9 @@ function renderCalMonth() {
         const evs = byDay[ds] || [];
         return `<div class="calcell ${inMonth ? "" : "dim"} ${ds === today ? "today" : ""}" data-day="${ds}">
           <span class="dnum">${d.getDate()}</span>
-          ${evs.slice(0, 3).map(a => `<span class="calev ${a.status === "Done" ? "struck" : ""}" style="background:${typeColor(a.type)}">${typeGlyph(a.type, 9)}${esc(a.title)}</span>`).join("")}
+          ${evs.slice(0, 3).map(a => `<span class="calev ${a.status === "Done" ? "struck" : ""}" style="background:${asgAccent(a)}">${typeGlyph(a.type, 9)}${esc(a.title)}</span>`).join("")}
           ${evs.length > 3 ? `<span class="calmore">+${evs.length - 3} more</span>` : ""}
-          <span class="dotbar">${evs.slice(0, 6).map(a => `<span class="evdot" style="background:${typeColor(a.type)};${a.status === "Done" ? "opacity:.35" : ""}"></span>`).join("")}</span>
+          <span class="dotbar">${evs.slice(0, 6).map(a => `<span class="evdot" style="background:${asgAccent(a)};${a.status === "Done" ? "opacity:.35" : ""}"></span>`).join("")}</span>
         </div>`;
       }).join("")}
     </div>`;
@@ -2302,12 +2320,12 @@ function renderCalList() {
     <div class="asg-table">
       ${list.length ? list.map(a => {
         const over = a.status !== "Done" && dayDiff(today, a.due) < 0;
-        const tc = typeColor(a.type);
-        return `<div class="asgrow ${a.status === "Done" ? "done" : ""}" data-asg="${a.id}" style="background:color-mix(in srgb, ${tc} 11%, var(--card));border-color:color-mix(in srgb, ${tc} 32%, var(--line))">
-          <span class="bar" style="background:${tc}"></span>
+        const ac = asgAccent(a);
+        return `<div class="asgrow ${a.status === "Done" ? "done" : ""}" data-asg="${a.id}" style="background:color-mix(in srgb, ${ac} 11%, var(--card));border-color:color-mix(in srgb, ${ac} 32%, var(--line))">
+          <span class="bar" style="background:${ac}"></span>
           <span class="t">${esc(a.title)}</span>
           ${typeChip(a.type)}
-          ${a.courseId ? `<span class="chip c-faint">${esc(courseLabel(a.courseId))}</span>` : ""}
+          ${a.courseId ? courseChip(a.courseId) : ""}
           <span class="due ${over ? "over" : ""}">${relDay(a.due)}</span>
         </div>`;
       }).join("") : `<div class="empty">${emptyLine(3)}</div>`}
